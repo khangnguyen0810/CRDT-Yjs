@@ -2,63 +2,63 @@ import { useEffect, useState, useRef, useMemo, useCallback } from "react";
 import * as Y from "yjs";
 import { Textarea } from "./TextArea";
 
-const UPDATE_INTERVAL_TIME = 1000;
-let updateInterval = setInterval(() => {}, 1000);
+const SYNC_INTERVAL_MS = 1000;
+let syncInterval = setInterval(() => {}, 1000);
 
-const useAwarenessUserInfos = (awareness, editor) => {
-  const [userInfos, setUserInfos] = useState([]);
+const useUserAwareness = (awareness, editorSet) => {
+  const [userStates, setUserStates] = useState([]);
 
   useEffect(() => {
     if (!awareness) return;
 
-    const updateUserInfos = () => {
-      setUserInfos(
-        [...awareness.getStates()].map(([id, info]) => {
-          if (info.user.edited) {
-            editor.current.add(info.user.clientName);
+    const updateUserStates = () => {
+      setUserStates(
+        [...awareness.getStates()].map(([id, state]) => {
+          if (state.user.edited) {
+            editorSet.current.add(state.user.clientName);
           }
           return {
-            ...info.user,
-            cursor: info.cursor,
+            ...state.user,
+            cursor: state.cursor,
             id,
             current: awareness.clientID === id,
           };
         })
       );
-      //console.log(awareness.getStates());
     };
 
-    updateUserInfos();
-    awareness.on("change", updateUserInfos);
+    updateUserStates();
+    awareness.on("change", updateUserStates);
 
     return () => {
-      awareness.off("change", updateUserInfos);
+      awareness.off("change", updateUserStates);
     };
-  }, [awareness, editor]);
+  }, [awareness, editorSet]);
 
-  return { userInfo: userInfos, editor: editor.current };
+  return { userStates, editorSet: editorSet.current };
 };
 
-const toRelative = (yPosAbs, yText) => {
-  return yPosAbs != null && yText
-    ? Y.createRelativePositionFromTypeIndex(yText, yPosAbs)
+const getRelativePosition = (absolutePos, yText) => {
+  return absolutePos != null && yText
+    ? Y.createRelativePositionFromTypeIndex(yText, absolutePos)
     : null;
 };
 
-const toAbsolute = (yPosRel, yDoc) => {
-  return yPosRel && yDoc
-    ? Y.createAbsolutePositionFromRelativePosition(yPosRel, yDoc).index ?? -1
+const getAbsolutePosition = (relativePos, yDoc) => {
+  return relativePos && yDoc
+    ? Y.createAbsolutePositionFromRelativePosition(relativePos, yDoc).index ??
+        -1
     : -1;
 };
 
 export const YjsTextarea = (props) => {
   const { yText, awareness, db, setRef } = props;
-  const editor = useRef(new Set());
-  const userInfos = useAwarenessUserInfos(awareness, editor);
-  const ref = useRef(null);
-  const helperRef = useRef(null);
-  const cursorsRef = useRef(null);
-  const [originalText, setOriginalText] = useState("");
+  const editorSet = useRef(new Set());
+  const { userStates } = useUserAwareness(awareness, editorSet);
+  const textAreaRef = useRef(null);
+  const helperDivRef = useRef(null);
+  const cursorsDivRef = useRef(null);
+  const [initialText, setInitialText] = useState("");
 
   const undoManager = useMemo(() => {
     return yText
@@ -66,22 +66,22 @@ export const YjsTextarea = (props) => {
       : undefined;
   }, [yText]);
 
-  const uploadToIndexeddb = useCallback(async () => {
-    if (editor.current && editor.current.size > 0) {
-      const tx = db.transaction("version", "readwrite");
-      const textareaString = yText.toString();
+  const saveToIndexedDB = useCallback(async () => {
+    if (editorSet.current && editorSet.current.size > 0) {
+      const transaction = db.transaction("version", "readwrite");
+      const currentText = yText.toString();
       await Promise.all([
-        tx.store.put(
+        transaction.store.put(
           {
-            editor: editor.current,
-            originText: originalText,
-            newText: textareaString,
+            editor: editorSet.current,
+            originText: initialText,
+            newText: currentText,
           },
           new Date().toLocaleString()
         ),
-        tx.done,
+        transaction.done,
       ]);
-      editor.current = new Set();
+      editorSet.current = new Set();
       if (awareness.getLocalState()) {
         awareness.setLocalStateField("user", {
           ...awareness.getLocalState().user,
@@ -91,26 +91,26 @@ export const YjsTextarea = (props) => {
         awareness.setLocalStateField("user", { edited: false });
       }
       window.dispatchEvent(new CustomEvent("versionStoreUpdated"));
-      setOriginalText(textareaString);
-      clearInterval(updateInterval);
+      setInitialText(currentText);
+      clearInterval(syncInterval);
     }
-  }, [db, yText, originalText, awareness]);
+  }, [db, yText, initialText, awareness]);
 
-  const resetLocalAwarenessCursors = useCallback(() => {
-    if (ref.current && awareness && yText) {
-      const s = ref.current.selectionStart;
-      const e = ref.current.selectionEnd;
+  const updateLocalCursorState = useCallback(() => {
+    if (textAreaRef.current && awareness && yText) {
+      const start = textAreaRef.current.selectionStart;
+      const end = textAreaRef.current.selectionEnd;
       awareness.setLocalStateField("cursor", {
-        anchor: toRelative(s, yText),
-        focus: toRelative(e, yText),
+        anchor: getRelativePosition(start, yText),
+        focus: getRelativePosition(end, yText),
       });
     }
   }, [yText, awareness]);
 
-  const handleLocalTextChange = useCallback(
+  const handleTextChange = useCallback(
     (delta) => {
-      const input$ = ref.current;
-      if (yText && undoManager && input$) {
+      const textArea = textAreaRef.current;
+      if (yText && undoManager && textArea) {
         if (delta === "undo") {
           undoManager.undo();
         } else if (delta === "redo") {
@@ -118,111 +118,106 @@ export const YjsTextarea = (props) => {
         } else {
           yText.applyDelta(delta);
         }
-        input$.value = yText.toString();
-        clearInterval(updateInterval);
-        const newText = input$.value;
-        updateInterval = setInterval(() => {
-          uploadToIndexeddb(originalText, newText);
-        }, UPDATE_INTERVAL_TIME);
+        textArea.value = yText.toString();
+        clearInterval(syncInterval);
+        const newText = textArea.value;
+        syncInterval = setInterval(() => {
+          saveToIndexedDB(initialText, newText);
+        }, SYNC_INTERVAL_MS);
         awareness.setLocalStateField("user", {
           ...awareness.getLocalState().user,
           edited: true,
         });
       }
-      resetLocalAwarenessCursors();
+      updateLocalCursorState();
     },
     [
       undoManager,
       yText,
-      originalText,
+      initialText,
       awareness,
-      resetLocalAwarenessCursors,
-      uploadToIndexeddb,
+      updateLocalCursorState,
+      saveToIndexedDB,
     ]
   );
 
   useEffect(() => {
-    if (yText && yText.doc && ref.current && awareness) {
+    if (yText && yText.doc && textAreaRef.current && awareness) {
       const yDoc = yText.doc;
-      const input$ = ref.current;
-      const syncFromYDoc = (_, origin) => {
+      const textArea = textAreaRef.current;
+      const syncTextFromDoc = (_, origin) => {
         if (
           (origin !== undoManager && origin != null) ||
-          input$.value !== yText.toString()
+          textArea.value !== yText.toString()
         ) {
-          clearInterval(updateInterval);
-          updateInterval = setInterval(uploadToIndexeddb, UPDATE_INTERVAL_TIME);
-          input$.value = yText.toString();
+          clearInterval(syncInterval);
+          syncInterval = setInterval(saveToIndexedDB, SYNC_INTERVAL_MS);
+          textArea.value = yText.toString();
           const cursor = awareness.getLocalState()?.cursor;
-          const newRange = [
-            toAbsolute(cursor?.anchor, yDoc),
-            toAbsolute(cursor?.focus, yDoc),
+          const newSelection = [
+            getAbsolutePosition(cursor?.anchor, yDoc),
+            getAbsolutePosition(cursor?.focus, yDoc),
           ];
-          input$.setSelectionRange(newRange[0], newRange[1]);
-          resetLocalAwarenessCursors();
+          textArea.setSelectionRange(newSelection[0], newSelection[1]);
+          updateLocalCursorState();
         }
       };
 
-      syncFromYDoc();
-      yDoc.on("update", syncFromYDoc);
+      syncTextFromDoc();
+      yDoc.on("update", syncTextFromDoc);
 
       return () => {
-        yDoc.off("update", syncFromYDoc);
+        yDoc.off("update", syncTextFromDoc);
       };
     }
-  }, [
-    yText,
-    undoManager,
-    resetLocalAwarenessCursors,
-    awareness,
-    uploadToIndexeddb,
-  ]);
+  }, [yText, undoManager, updateLocalCursorState, awareness, saveToIndexedDB]);
 
-  const renderUserIndicator = useCallback(
-    (userInfo) => {
+  const renderCursorIndicators = useCallback(
+    (userState) => {
       const yDoc = yText?.doc;
       const text = yText?.toString() ?? "";
-      const overlayRect = helperRef.current?.getBoundingClientRect();
-      if (!yDoc || !userInfo.cursor || !overlayRect || userInfo.current) {
+      const overlayRect = helperDivRef.current?.getBoundingClientRect();
+      if (!yDoc || !userState.cursor || !overlayRect || userState.current) {
         return [];
       }
-      const { anchor, focus } = userInfo.cursor;
+      const { anchor, focus } = userState.cursor;
 
-      const [start, end] = [toAbsolute(anchor, yDoc), toAbsolute(focus, yDoc)];
+      const [start, end] = [
+        getAbsolutePosition(anchor, yDoc),
+        getAbsolutePosition(focus, yDoc),
+      ];
       let rects = getClientRects(start, end);
 
-      return rects.map((rect, idx) => {
-        return (
-          <div
-            key={userInfo.id + "_" + idx}
-            className="user-indicator"
-            style={{
-              "--user-color": userInfo.color,
-              left: rect.left - overlayRect.left,
-              top: rect.top - overlayRect.top,
-              width: rect.width,
-              height: rect.height,
-            }}
-          >
-            {idx === rects.length - 1 && (
-              <div className="user-cursor">
-                <div className="user-cursor-label">{userInfo.clientName}</div>
-              </div>
-            )}
-            <div className="user-cursor-selection" />
-          </div>
-        );
-      });
+      return rects.map((rect, idx) => (
+        <div
+          key={userState.id + "_" + idx}
+          className="user-indicator"
+          style={{
+            "--user-color": userState.color,
+            left: rect.left - overlayRect.left,
+            top: rect.top - overlayRect.top,
+            width: rect.width,
+            height: rect.height,
+          }}
+        >
+          {idx === rects.length - 1 && (
+            <div className="user-cursor">
+              <div className="user-cursor-label">{userState.clientName}</div>
+            </div>
+          )}
+          <div className="user-cursor-selection" />
+        </div>
+      ));
 
       function getClientRects(start, end) {
-        if (!helperRef.current || start === -1 || end === -1) {
+        if (!helperDivRef.current || start === -1 || end === -1) {
           return [];
         }
-        helperRef.current.textContent = text + "\n";
-        if (helperRef.current.firstChild == null) {
+        helperDivRef.current.textContent = text + "\n";
+        if (helperDivRef.current.firstChild == null) {
           return [];
         }
-        const textNode = helperRef.current.firstChild;
+        const textNode = helperDivRef.current.firstChild;
         const range = document.createRange();
         range.setStart(textNode, start);
         range.setEnd(textNode, end);
@@ -234,41 +229,41 @@ export const YjsTextarea = (props) => {
   );
 
   useEffect(() => {
-    if (ref.current && cursorsRef.current && helperRef.current) {
-      const input$ = ref.current;
-      const cursors$ = cursorsRef.current;
-      const helper$ = helperRef.current;
-      const handleScroll = () => {
-        cursors$.scrollLeft = input$.scrollLeft;
-        cursors$.scrollTop = input$.scrollTop;
-        helper$.scrollLeft = input$.scrollLeft;
-        helper$.scrollTop = input$.scrollTop;
+    if (textAreaRef.current && cursorsDivRef.current && helperDivRef.current) {
+      const textArea = textAreaRef.current;
+      const cursorsDiv = cursorsDivRef.current;
+      const helperDiv = helperDivRef.current;
+      const syncScroll = () => {
+        cursorsDiv.scrollLeft = textArea.scrollLeft;
+        cursorsDiv.scrollTop = textArea.scrollTop;
+        helperDiv.scrollLeft = textArea.scrollLeft;
+        helperDiv.scrollTop = textArea.scrollTop;
       };
-      input$.addEventListener("scroll", handleScroll, { passive: true });
+      textArea.addEventListener("scroll", syncScroll, { passive: true });
       return () => {
-        input$.removeEventListener("scroll", handleScroll);
+        textArea.removeEventListener("scroll", syncScroll);
       };
     }
   }, []);
 
   useEffect(() => {
-    setRef(ref);
-  }, [ref, setRef]);
+    setRef(textAreaRef);
+  }, [textAreaRef, setRef]);
 
   return (
     <div className="relative w-[calc(100%-16px)] flex-grow border border-black rounded-lg bg-white flex flex-col">
       <Textarea
         className="inline-block text-2xl w-full h-full whitespace-pre-wrap resize-none border-none p-3 bg-transparent break-words m-0 flex-grow focus:outline-none"
-        ref={ref}
-        onSelectionChange={resetLocalAwarenessCursors}
-        onTextChange={handleLocalTextChange}
+        ref={textAreaRef}
+        onSelectionChange={updateLocalCursorState}
+        onTextChange={handleTextChange}
       />
       <div className="input overlay selection-helper-container hidden">
-        <div className="selection-helper" ref={helperRef} />
+        <div className="selection-helper" ref={helperDivRef} />
       </div>
-      <div className="overlay cursors-container" ref={cursorsRef}>
+      <div className="overlay cursors-container" ref={cursorsDivRef}>
         <div className="cursors-wrapper">
-          {userInfos.userInfo.flatMap(renderUserIndicator)}
+          {userStates.flatMap(renderCursorIndicators)}
         </div>
       </div>
     </div>
